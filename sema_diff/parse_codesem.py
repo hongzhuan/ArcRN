@@ -31,21 +31,35 @@ def _looks_like_file_path(s: str) -> bool:
     s = s.strip()
     if len(s) < 3 or len(s) > 300:
         return False
-    if "/" not in s and "\\" not in s:
+
+    # 排除 URL
+    lower = s.lower()
+    if lower.startswith(("http://", "https://")):
         return False
-    # 简单扩展名判断（C/C++/headers/脚本等）
-    exts = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".m", ".mm",
-            ".py", ".js", ".ts", ".java", ".kt", ".go", ".rs", ".cs", ".swift",
-            ".md", ".txt", ".json", ".yml", ".yaml")
-    s_norm = s.lower()
-    return any(s_norm.endswith(e) for e in exts)
+
+    # 允许“纯文件名”（如 shell.c / xmllint.c），也允许带目录
+    exts = (
+        ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".m", ".mm",
+        ".py", ".js", ".ts", ".java", ".kt", ".go", ".rs", ".cs", ".swift",
+        ".md", ".txt", ".json", ".yml", ".yaml"
+    )
+    return any(lower.endswith(e) for e in exts)
 
 
 def _choose_desc_from_dict(d: Dict[str, Any]) -> Optional[str]:
     """
     从一个 dict 中尽量挑出“描述文本”。
+    适配：libxml2 CodeSem 使用 "Functionality"。
     """
-    # 常见候选字段（按优先级）
+    # NEW: 直接支持 libxml2 schema
+    for k in ("Functionality", "functionality"):
+        v = d.get(k)
+        if isinstance(v, str):
+            t = v.strip()
+            if len(t) >= 5:
+                return t
+
+    # 常见候选字段（兼容其它项目）
     candidates = [
         "description", "desc", "summary", "semantics", "semantic", "meaning",
         "function", "purpose", "responsibility", "comment", "explain", "explanation",
@@ -58,12 +72,16 @@ def _choose_desc_from_dict(d: Dict[str, Any]) -> Optional[str]:
             if len(t) >= 5:
                 return t
 
-    # 有些 schema 是 {"file": "...", "code_sem": "..."} 之类
+    # 最后兜底：挑一个“足够长”的字符串字段（排除明显不是描述的 key）
     for k, v in d.items():
-        if isinstance(v, str):
-            t = v.strip()
-            if len(t) >= 10 and k.lower() not in ("path", "file", "name", "filename"):
-                return t
+        if not isinstance(v, str):
+            continue
+        if k.lower() in ("path", "file", "name", "filename", "fullpath", "relative_path"):
+            continue
+        t = v.strip()
+        if len(t) >= 10:
+            return t
+
     return None
 
 
@@ -108,7 +126,22 @@ class CodeSemIndex:
 
 def parse_codesem(json_path: Path) -> CodeSemIndex:
     data = json.loads(json_path.read_text(encoding="utf-8"))
-    pairs = _extract_file_desc_pairs(data)
+
+    pairs: List[Tuple[str, str]] = []
+
+    # NEW: fast path for {"summary": [ {file, Functionality}, ... ]}
+    if isinstance(data, dict) and isinstance(data.get("summary"), list):
+        for it in data["summary"]:
+            if not isinstance(it, dict):
+                continue
+            fp = it.get("file")
+            if isinstance(fp, str) and _looks_like_file_path(fp):
+                desc = _choose_desc_from_dict(it)
+                if desc:
+                    pairs.append((normalize_path(fp), desc))
+    else:
+        # fallback: recursive extraction for other schemas
+        pairs = _extract_file_desc_pairs(data)
 
     file_to_desc: Dict[str, str] = {}
     for fp, desc in pairs:
