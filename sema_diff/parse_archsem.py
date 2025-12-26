@@ -24,11 +24,18 @@ def _as_text(v: Any) -> Optional[str]:
 
 def _extract_patterns(obj: Any) -> List[str]:
     """
-    尝试提取 patterns（可能是 list[str] 或 list[dict]）。
+    尝试提取 patterns（支持：
+    - patterns/pattern: list[str] / list[dict]
+    - architecture_pattern: str   (你这个 ArchSem 的 schema)
     """
     patterns: List[str] = []
 
     if isinstance(obj, dict):
+        # NEW: single pattern field
+        ap = obj.get("architecture_pattern")
+        if isinstance(ap, str) and ap.strip():
+            patterns.append(ap.strip())
+
         for key in ["patterns", "pattern", "arch_patterns", "architecture_patterns"]:
             v = obj.get(key)
             if isinstance(v, list):
@@ -36,11 +43,10 @@ def _extract_patterns(obj: Any) -> List[str]:
                     if isinstance(it, str) and it.strip():
                         patterns.append(it.strip())
                     elif isinstance(it, dict):
-                        # 常见 dict: {"name": "...", "desc": "..."}
                         name = _as_text(it.get("name")) or _as_text(it.get("pattern")) or _as_text(it.get("type"))
                         if name:
                             patterns.append(name)
-        # 递归
+
         for v in obj.values():
             patterns.extend(_extract_patterns(v))
 
@@ -60,35 +66,47 @@ def _extract_patterns(obj: Any) -> List[str]:
 
 def _build_component_summary(d: Dict[str, Any]) -> Optional[str]:
     """
-    从一个 component dict 尽量拼出摘要。
+    从一个 component dict 尽量拼出摘要：
+    1) 优先读取 nested[*].content（你的 ArchSem schema）
+    2) 再补充 description/summary/semantics 等字段（若存在）
     """
     name = _as_text(d.get("name")) or _as_text(d.get("component")) or _as_text(d.get("id"))
     if not name:
         return None
 
-    # 常见描述字段
-    desc_fields = ["description", "desc", "summary", "semantics", "responsibility", "role", "intent"]
     parts: List[str] = []
+
+    # NEW: nested[*].content
+    nested = d.get("nested")
+    if isinstance(nested, list):
+        for it in nested:
+            if not isinstance(it, dict):
+                continue
+            # 常见：{"@type":"indicator","content":"..."}
+            c = _as_text(it.get("content"))
+            if c:
+                parts.append(c)
+
+    # 常见描述字段（补充）
+    desc_fields = ["description", "desc", "summary", "semantics", "responsibility", "role", "intent"]
     for f in desc_fields:
         t = _as_text(d.get(f))
         if t:
             parts.append(t)
 
-    # 如果没有显式 description，则尝试从其他字符串字段挑一个较长的
-    if not parts:
-        for k, v in d.items():
-            if k.lower() in ("name", "component", "id"):
-                continue
-            t = _as_text(v)
-            if t and len(t) >= 15:
-                parts.append(t)
-                break
+    # 去重（避免 nested 与 summary 重复）
+    seen = set()
+    uniq_parts = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            uniq_parts.append(p)
 
-    if not parts:
+    if not uniq_parts:
         return None
 
-    # 组合摘要（不宜过长，交给 render/LLM 做进一步表达）
-    summary = " ".join(parts).strip()
+    # 拼接成一个摘要（用换行更适合 Markdown / LLM）
+    summary = "\n".join(uniq_parts).strip()
     return summary if summary else None
 
 
