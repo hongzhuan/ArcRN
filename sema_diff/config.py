@@ -6,8 +6,8 @@ config.py
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+from dataclasses import dataclass, field
+from sema_diff.denoise import DenoiseConfig
 
 @dataclass(frozen=True)
 class DiffConfig:
@@ -28,6 +28,17 @@ class DiffConfig:
 
     # 文件路径归一化：是否将 '\' 替换为 '/'
     normalize_path_separators: bool = True
+
+    # Step-1: 降噪配置（先处理 rename 噪声）
+    denoise: DenoiseConfig = field(
+        default_factory=lambda: DenoiseConfig(
+            enabled=True,
+            drop_module_renamed=True,
+            drop_renamed_if_has_other_events_same_pair=True,
+            keep_rename_if_only=False,  # MVP：默认直接压掉 rename-only
+            drop_rename_if_unknown_name=True,
+        )
+    )
 
 
 def default_config() -> DiffConfig:

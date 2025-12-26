@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import json
+import copy
 from pathlib import Path
 
 from sema_diff.config import DiffConfig, default_config
@@ -29,6 +30,7 @@ from sema_diff.render_md import render_markdown_template, render_markdown_llm
 from sema_diff.parse_codesem import parse_codesem, CodeSemIndex
 from sema_diff.parse_archsem import parse_archsem, ArchSemIndex
 
+from sema_diff.denoise import denoise_changes
 
 def _ensure_out_dir(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -207,14 +209,32 @@ def main() -> None:
 
     ir = DiffIR(meta=meta, quality=quality, entities=entities, changes=events)
 
-    out_path = out_dir / "diff_ir.json"
-    dump_ir(ir, str(out_path), pretty=True)
-    print(f"\nWrote IR: {out_path}")
-    print(f"Total changes: {len(events)}")
+    # === 6.1 写出 raw IR（未降噪，供对照/回溯） ===
+    raw_path = out_dir / "diff_ir-raw.json"
+    dump_ir(ir, str(raw_path), pretty=True)
+    print(f"\nWrote RAW IR: {raw_path}")
+    print(f"RAW total changes: {len(events)}")
 
-    # 7) optional markdown summary
+    # === 6.2 生成 denoised IR（Step-1：过滤 rename 噪声） ===
+    ir_denoised = copy.deepcopy(ir)
+    filtered_changes, denoise_stats = denoise_changes(
+        changes=ir_denoised.changes,
+        named_a=idx_a,
+        named_b=idx_b,
+        cfg=cfg.denoise,
+    )
+    ir_denoised.changes = filtered_changes
+    # 把降噪统计写入 meta，便于实验记录
+    ir_denoised.meta["denoise"] = denoise_stats
+
+    denoised_path = out_dir / "diff_ir-denoised.json"
+    dump_ir(ir_denoised, str(denoised_path), pretty=True)
+    print(f"Wrote DENOISED IR: {denoised_path}")
+    print(f"DENOISED total changes: {len(filtered_changes)} (dropped={denoise_stats.get('dropped')})")
+
+    # === 7) optional markdown summary（默认用 denoised 作为输入） ===
     if generate_md:
-        ir_dict = json.loads(out_path.read_text(encoding="utf-8"))
+        ir_dict = json.loads(denoised_path.read_text(encoding="utf-8"))
 
         if md_mode == "template":
             md = render_markdown_template(ir_dict)
