@@ -38,6 +38,21 @@ def _index_modules_by_uid(idx: NamedClustersIndex) -> Dict[str, Module]:
 def _top_k(items: List[str], k: int) -> List[str]:
     return items[:k] if len(items) > k else items
 
+def _files_to_sem_list(files: List[str], codesem: Optional["CodeSemIndex"]) -> List[Dict[str, str]]:
+    """
+    将文件路径列表转换为 semantics.code 所需的 [{"path":..., "desc":...}, ...]。
+    - 现在按你的要求：必须把“所有涉及到的 files 的 desc 都添加进来”
+    - 若 codesem 缺失或某个文件缺少 desc，则 desc 置为空字符串，仍然保留 path，确保“全量”。
+    """
+    out: List[Dict[str, str]] = []
+    for fp in files:
+        desc = ""
+        if codesem is not None:
+            d = codesem.file_to_desc.get(fp)
+            if isinstance(d, str):
+                desc = d
+        out.append({"path": fp, "desc": desc})
+    return out
 
 def build_module_level_events(
     idx_a: NamedClustersIndex,
@@ -74,13 +89,29 @@ def build_module_level_events(
     for uid in alignment.removed:
         if uid not in a_mod:
             continue
+
+        mod = a_mod[uid]
+        removed_all = sorted(list(mod.files))
+
         events.append(
             ChangeEvent(
                 id=f"CHG-{id_counter:04d}",
                 type="module_removed",
                 confidence=0.95,
                 summary=f"Module {uid} removed (unmatched in target version).",
-                detail={"module_uid": uid, "module_name": _base_name(uid), "file_count": a_mod[uid].file_count},
+                # detail={"module_uid": uid, "module_name": _base_name(uid), "file_count": a_mod[uid].file_count},
+                detail={
+                    "module_uid": uid,
+                    "module_name": _base_name(uid),
+                    "file_count": mod.file_count,
+                    "semantics": {
+                        "code": {
+                            "added_files": [],
+                            "removed_files": _files_to_sem_list(removed_all, codesem_a),
+                        },
+                        "arch": {},  # 按你的要求：arch 留空
+                    },
+                },
                 evidence=[EvidenceItem(kind="NamedClusters", ref=f"module:{uid}", note="Present in A, unmatched in B")],
             )
         )
@@ -89,13 +120,29 @@ def build_module_level_events(
     for uid in alignment.added:
         if uid not in b_mod:
             continue
+
+        mod = b_mod[uid]
+        added_all = sorted(list(mod.files))
+
         events.append(
             ChangeEvent(
                 id=f"CHG-{id_counter:04d}",
                 type="module_added",
                 confidence=0.95,
                 summary=f"Module {uid} added (unmatched from source version).",
-                detail={"module_uid": uid, "module_name": _base_name(uid), "file_count": b_mod[uid].file_count},
+                # detail={"module_uid": uid, "module_name": _base_name(uid), "file_count": b_mod[uid].file_count},
+                detail={
+                    "module_uid": uid,
+                    "module_name": _base_name(uid),
+                    "file_count": mod.file_count,
+                    "semantics": {
+                        "code": {
+                            "added_files": _files_to_sem_list(added_all, codesem_b),
+                            "removed_files": [],
+                        },
+                        "arch": {},  # 按你的要求：arch 留空
+                    },
+                },
                 evidence=[EvidenceItem(kind="NamedClusters", ref=f"module:{uid}", note="Present in B, unmatched in A")],
             )
         )
@@ -188,19 +235,23 @@ def build_module_level_events(
             added_top = _top_k(added_files, top_k_files)
             removed_top = _top_k(removed_files, top_k_files)
 
-            code_added = []
-            if codesem_b is not None:
-                for fp in added_top:
-                    desc = codesem_b.file_to_desc.get(fp)
-                    if desc:
-                        code_added.append({"path": fp, "desc": desc})
+            # code_added = []
+            # if codesem_b is not None:
+            #     for fp in added_top:
+            #         desc = codesem_b.file_to_desc.get(fp)
+            #         if desc:
+            #             code_added.append({"path": fp, "desc": desc})
+            #
+            # code_removed = []
+            # if codesem_a is not None:
+            #     for fp in removed_top:
+            #         desc = codesem_a.file_to_desc.get(fp)
+            #         if desc:
+            #             code_removed.append({"path": fp, "desc": desc})
 
-            code_removed = []
-            if codesem_a is not None:
-                for fp in removed_top:
-                    desc = codesem_a.file_to_desc.get(fp)
-                    if desc:
-                        code_removed.append({"path": fp, "desc": desc})
+            # semantics：不再截断，按稳定顺序把所有涉及到的 files 的 desc 都添加进来
+            code_added = _files_to_sem_list(sorted(added_files), codesem_b)
+            code_removed = _files_to_sem_list(sorted(removed_files), codesem_a)
 
             arch_ctx = {}
             if comp_a is not None and comp_b is not None and (archsem_a is not None or archsem_b is not None):
