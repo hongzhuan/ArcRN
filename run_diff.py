@@ -11,6 +11,7 @@ import os
 import json
 import copy
 from pathlib import Path
+from datetime import datetime
 
 from sema_diff.config import DiffConfig, default_config
 from sema_diff.loader import resolve_inputs_from_dirs, ResolvedInputs
@@ -31,6 +32,7 @@ from sema_diff.parse_codesem import parse_codesem, CodeSemIndex
 from sema_diff.parse_archsem import parse_archsem, ArchSemIndex
 
 from sema_diff.denoise import denoise_changes
+from sema_diff.significance import compute_architecture_significance
 
 def _ensure_out_dir(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -44,6 +46,7 @@ def main() -> None:
     version_a_label = "v2.14.2"
     version_b_label = "v2.14.3"
     repo_name = "libxml2"
+    timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
 
     # === 模块级参数（降噪关键） ===
     min_edge_weight = 0.0          # jaccard 边过滤；模块多时可调到 0.05~0.10
@@ -53,10 +56,10 @@ def main() -> None:
 
     # === 可选：生成 Markdown Summary ===
     generate_md = True
-    md_mode = "template"  # "template" or "llm"
+    md_mode = "llm"  # "template" or "llm"
     llm_model = "deepseek-chat"
 
-    out_dir = Path(os.getcwd()) / "out" / f"{repo_name}_{version_a_label}-{version_b_label}"
+    out_dir = Path(os.getcwd()) / "out" / f"{repo_name}_{version_a_label}-{version_b_label}-{timestamp}"
     _ensure_out_dir(out_dir)
 
     cfg: DiffConfig = default_config()
@@ -227,9 +230,62 @@ def main() -> None:
     # 把降噪统计写入 meta，便于实验记录
     ir_denoised.meta["denoise"] = denoise_stats
 
+    # === 6.2.1 写出 denoised IR（未打分，便于对照实验） ===
     denoised_path = out_dir / "diff_ir-denoised.json"
     dump_ir(ir_denoised, str(denoised_path), pretty=True)
-    print(f"Wrote DENOISED IR: {denoised_path}")
+    print(f"Wrote DENOISED (no significance) IR: {denoised_path}")
+    print(f"DENOISED (no significance) total changes: {len(filtered_changes)} (dropped={denoise_stats.get('dropped')})")
+
+    # === Step-2：计算 architecture_significance（多维度度量） ===
+    max_files = max(
+        entities["files"]["count_a"],
+        entities["files"]["count_b"],
+    )
+
+    scored = 0
+    for ev in ir_denoised.changes:
+        # 兼容 ChangeEvent 对象 / dict
+        ev_type = ev["type"] if isinstance(ev, dict) else getattr(ev, "type", None)
+        if ev_type == "quality_warning":
+            continue
+
+        # 取 detail（兼容对象 / dict）
+        if isinstance(ev, dict):
+            ev.setdefault("detail", {})
+            detail = ev["detail"]
+        else:
+            if getattr(ev, "detail", None) is None:
+                ev.detail = {}
+            detail = ev.detail
+
+        # compute_architecture_significance 期望输入 dict，因此把 event 投影成 dict
+        ev_for_score = ev if isinstance(ev, dict) else {
+            "type": ev_type,
+            "detail": detail,
+            "confidence": getattr(ev, "confidence", None),
+            "id": getattr(ev, "id", None),
+            "summary": getattr(ev, "summary", None),
+        }
+
+        sig = compute_architecture_significance(
+            ev_for_score,
+            max_files_in_project=max_files,
+        )
+
+        # 写回 detail
+        detail["architecture_significance"] = sig
+        scored += 1
+
+    ir_denoised.meta.setdefault("significance", {})
+    ir_denoised.meta["significance"].update({
+        "enabled": True,
+        "scored_events": scored,
+        "max_files_in_project": max_files,
+    })
+
+    denoised_significance_path = out_dir / "diff_ir-denoised-significance.json"
+    dump_ir(ir_denoised, str(denoised_significance_path), pretty=True)
+    print(f"Wrote DENOISED IR: {denoised_significance_path}")
     print(f"DENOISED total changes: {len(filtered_changes)} (dropped={denoise_stats.get('dropped')})")
 
     # === 7) optional markdown summary（默认用 denoised 作为输入） ===
