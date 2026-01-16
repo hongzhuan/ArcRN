@@ -1,5 +1,5 @@
 """
-llm.py
+deepseek_client.py
 - DeepSeek (OpenAI SDK) 调用封装
 - 强约束：不幻觉 + 每条变更必须引用 [CHG-XXXX]
 """
