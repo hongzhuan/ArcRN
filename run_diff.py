@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 
 from llm.summarize_changes import summarize_ir_changes
+from llm.render_md import render_markdown_template, render_markdown_llm
 
 from sema_diff.config import DiffConfig, default_config
 from sema_diff.loader import resolve_inputs_from_dirs, ResolvedInputs
@@ -27,8 +28,6 @@ from sema_diff.module_diff_core import build_module_level_events
 from sema_diff.quality import build_quality_report
 from sema_diff.diff_core import build_snapshot, diff_file_universe  # 仅用于质量与实体统计
 from sema_diff.ir import DiffIR, now_iso_local, dump_ir
-
-from sema_diff.render_md import render_markdown_template, render_markdown_llm
 
 from sema_diff.parse_codesem import parse_codesem, CodeSemIndex
 from sema_diff.parse_archsem import parse_archsem, ArchSemIndex
