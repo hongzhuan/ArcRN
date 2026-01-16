@@ -3,9 +3,13 @@ render_md.py
 - 从 DiffIR（或 diff_ir.json）生成 Markdown
 - 支持两种模式：
   1) template：不使用 LLM，稳定输出
-  2) llm：调用 deepseek-chat，生成更自然的报告（强约束不幻觉）
+  2) llm：调用 deepseek-chat，生成更自然的报告
 
-注意：LLM 输入建议精简，避免 token 浪费与上下文限制。
+Stage-2（当前策略）：
+- LLM 输入来自 diff_ir-summary.json
+- 只喂 meta（可选）、quality（可选）、entities（可选）
+- changes 只喂 id / type / summary
+- 不喂 files desc，不喂 detail.semantics，不喂 ArchSem/CodeSem 长文本
 """
 
 from __future__ import annotations
@@ -31,6 +35,51 @@ COMP_TYPES = {"module_moved_between_components"}  # 老事件，当前模块级�
 QUALITY_TYPES = {"quality_warning"}
 
 
+# Stage-2 专用：更严格的 system prompt（只允许用 summary）
+SYSTEM_PROMPT_STAGE2 = """你是“软件架构变更报告”生成助手。你的回答必须使用中文，并且严格基于输入的 diff_ir-summary.json 内容。
+
+========================
+一、硬性规则（必须遵守）
+========================
+1) 严禁编造事实：只能使用 changes[].summary 中明确给出的信息。禁止补充背景、原因、动机、影响或任何推测性内容。
+2) 禁止使用未提供字段，请不要提及这些字段或从中推断信息。
+3) 强制引用 Change ID：凡是描述“发生了什么变更”的句子，必须在句末引用至少一个 Change ID，格式为 [CHG-XXXX]。
+   - 如果无法为一句话找到对应的 Change ID，则不要写这句话。
+4) 置信度标注：如果输入里没有 confidence 字段，请不要自行判断“低置信度”。（本阶段仅基于 summary 编排内容）
+5) 输出必须是合法的 Markdown，语言简洁、技术化，不要输出 JSON 原文或长段代码块。
+
+========================
+二、写作目标
+========================
+你的目标是生成一份“面向架构评审与版本对比”的报告，重点说明：
+- 模块层面的新增 / 删除 / 变更概况
+- 每条变更的 summary（来自 Stage-1）如何归纳进报告结构
+而不是解释“为什么发生”或“会带来什么业务后果”。
+
+========================
+三、输出结构（必须严格遵守）
+========================
+# Architecture Change Report: <version_a> → <version_b>
+
+## Overview
+- 2–4 条要点，总结整体变化范围（如变更事件数量、模块增删改数量等）。
+- 每一条都必须引用至少一个 Change ID，例如 [CHG-0001]。
+
+## Detected Changes
+按以下子类分组，每一条都必须引用 Change ID：
+### 新增模块
+
+### 删除模块
+
+### 变更模块
+
+
+## Appendix: Change Index
+- 按顺序列出所有 Change：
+  - CHG-XXXX: <summary>
+"""
+
+
 def load_ir_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -49,10 +98,9 @@ def slim_ir_for_llm(
     max_arch_summary_len: int = 320,
 ) -> Dict[str, Any]:
     """
-    精简 IR：保留 meta/quality/entities/changes 的核心字段，截断 evidence note 与语义长文本。
-    目标：
-    - 保留 detail（尤其是 detail.semantics），让 LLM 能写“语义变化”
-    - 但限制 CodeSem/ArchSem 摘要长度，避免 token 爆炸
+    旧版精简器（template 或旧策略可能仍会用到）：
+    - 保留 detail/semantics，并做截断
+    当前 Stage-2 的 llm 路径不会调用该函数，但保留以兼容历史用法。
     """
     meta = ir.get("meta", {})
     quality = ir.get("quality", {})
@@ -105,7 +153,6 @@ def slim_ir_for_llm(
 
         changes_out.append(out)
 
-    # meta: keep only what LLM needs for title
     meta_out = {
         "repo": meta.get("repo"),
         "version_a": meta.get("version_a"),
@@ -113,10 +160,44 @@ def slim_ir_for_llm(
         "generated_at": meta.get("generated_at"),
     }
 
-    quality_out = quality
-    entities_out = entities
+    return {"meta": meta_out, "quality": quality, "entities": entities, "changes": changes_out}
 
-    return {"meta": meta_out, "quality": quality_out, "entities": entities_out, "changes": changes_out}
+
+def slim_ir_for_stage2(ir: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Stage-2 专用精简器：
+    只保留 meta（必要字段）、quality（可选）、entities（可选）、
+    changes 中只保留 id / type / summary / detail.module_name。
+    """
+    meta = ir.get("meta", {}) or {}
+    out: Dict[str, Any] = {
+        "meta": {
+            "repo": meta.get("repo"),
+            "version_a": meta.get("version_a"),
+            "version_b": meta.get("version_b"),
+            "generated_at": meta.get("generated_at"),
+        }
+    }
+
+    # quality/entities 为可选：按你要求“如果需要的话”
+    if "quality" in ir:
+        out["quality"] = ir.get("quality") or {}
+    if "entities" in ir:
+        out["entities"] = ir.get("entities") or {}
+
+    changes_out: List[Dict[str, Any]] = []
+    for ev in ir.get("changes", []) or []:
+        if not isinstance(ev, dict):
+            continue
+        changes_out.append({
+            "id": ev.get("id"),
+            "type": ev.get("type"),
+            "summary": ev.get("summary"),
+            "module_name": ev.get("detail").get("module_name")
+        })
+
+    out["changes"] = changes_out
+    return out
 
 
 def _group_changes(changes: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -150,9 +231,8 @@ def _indent_block(block: str, prefix: str = "  ") -> str:
 
 def _render_semantics_block(change: Dict[str, Any]) -> str:
     """
-    从 change['detail']['semantics'] 中提取可读文本块。
-    - Architecture context：component 摘要 + patterns
-    - Code semantics：added/removed files 的语义描述（path + desc）
+    （template 模式使用）从 change['detail']['semantics'] 中提取可读文本块。
+    Stage-2 LLM 不会喂 semantics，因此 llm 模式不再依赖此函数。
     """
     detail = change.get("detail") or {}
     sem = detail.get("semantics") or {}
@@ -260,7 +340,6 @@ def render_markdown_template(ir: Dict[str, Any]) -> str:
     added = files_ent.get("added") or []
     removed = files_ent.get("removed") or []
 
-    # Find a stable_file_universe warning event id if available
     stable_ids = [c.get("id") for c in groups["Quality"] if "stable_file_universe" in str(c.get("detail", {}))]
     stable_id = stable_ids[0] if stable_ids else (groups["Quality"][0].get("id") if groups["Quality"] else None)
 
@@ -300,7 +379,6 @@ def render_markdown_template(ir: Dict[str, Any]) -> str:
             summary = (ev.get("summary", "") or ev.get("type", "")).strip()
             lines.append(f"- {summary}{low}. [{cid}]")
 
-            # Optional: show file examples for module_changed
             detail = ev.get("detail") or {}
             examples = detail.get("examples") or {}
             added_top = examples.get("added_files_top") or []
@@ -310,7 +388,6 @@ def render_markdown_template(ir: Dict[str, Any]) -> str:
             if isinstance(removed_top, list) and removed_top:
                 lines.append("  - Removed files (top): " + ", ".join([f"`{x}`" for x in removed_top]))
 
-            # NEW: semantics block (CodeSem/ArchSem evidence)
             sem_block = _render_semantics_block(ev)
             if sem_block:
                 lines.append(_indent_block(sem_block, prefix="  "))
@@ -342,18 +419,26 @@ def render_markdown_template(ir: Dict[str, Any]) -> str:
 
 
 def render_markdown_llm(ir: Dict[str, Any], model: str = "deepseek-chat") -> str:
-    slim = slim_ir_for_llm(ir)
-    return generate_markdown_from_ir(slim, model=model)
+    """
+    Stage-2：基于 diff_ir-summary.json（每条 change 的 summary 已由 Stage-1 生成）
+    只喂 meta/quality/entities + changes(id/type/summary)
+    """
+    slim = slim_ir_for_stage2(ir)
+    return generate_markdown_from_ir(
+        slim,
+        model=model,
+        system_prompt=SYSTEM_PROMPT_STAGE2,
+    )
 
 
 def main() -> None:
     """
     右键运行自测：
-    - 填写 diff_ir.json 路径
+    - 填写 diff_ir-summary.json 路径
     - 输出 diff_summary.template.md（模板法）
-    - 如果配置了 DEEPSEEK_API_KEY，可输出 diff_summary.llm.md
+    - 如果配置了 DEEPSEEK_API_KEY，可输出 diff_summary.llm.md（Stage-2）
     """
-    ir_path = Path(r"out\out_demo_ir.json")  # TODO: 改成你的实际路径
+    ir_path = Path(r"out\diff_ir-summary.json")  #
     if not ir_path.exists():
         raise FileNotFoundError(f"diff_ir.json not found: {ir_path}")
 
@@ -364,7 +449,7 @@ def main() -> None:
     out1.write_text(md1, encoding="utf-8")
     print(f"Wrote: {out1}")
 
-    # optional llm
+    # optional llm (Stage-2)
     try:
         md2 = render_markdown_llm(ir, model="deepseek-chat")
         out2 = ir_path.parent / "diff_summary.llm.md"
