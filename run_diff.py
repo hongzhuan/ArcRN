@@ -13,6 +13,8 @@ import copy
 from pathlib import Path
 from datetime import datetime
 
+from llm.summarize_changes import summarize_ir_changes
+
 from sema_diff.config import DiffConfig, default_config
 from sema_diff.loader import resolve_inputs_from_dirs, ResolvedInputs
 
@@ -236,6 +238,23 @@ def main() -> None:
     print(f"Wrote DENOISED (no significance) IR: {denoised_path}")
     print(f"DENOISED (no significance) total changes: {len(filtered_changes)} (dropped={denoise_stats.get('dropped')})")
 
+    # === 6.2.2 Stage-1：逐条 change 调用 LLM 生成 summary，输出 diff_ir-summary.json ===
+    summary_ir_path = out_dir / "diff_ir-summary.json"
+    try:
+        # summarize_ir_changes 接受 dict，所以这里读入刚写出的 denoised JSON
+        ir_for_stage1 = json.loads(denoised_path.read_text(encoding="utf-8"))
+        summarize_ir_changes(
+            ir=ir_for_stage1,
+            out_path=summary_ir_path,
+            model=llm_model,
+            api_key_env="DEEPSEEK_API_KEY",
+        )
+        print(f"Wrote IR with per-change LLM summaries: {summary_ir_path}")
+    except Exception as e:
+        # Stage-1 整体失败不阻断主流程（你要求“run_diff.py 不用调整”，所以这里只做最小兜底）
+        print(f"[WARN] Stage-1 summarize failed: {e}")
+        summary_ir_path = denoised_path  # 回退：后续 md 仍可用
+
     # === Step-2：计算 architecture_significance（多维度度量） ===
     max_files = max(
         entities["files"]["count_a"],
@@ -290,7 +309,7 @@ def main() -> None:
 
     # === 7) optional markdown summary（默认用 denoised 作为输入） ===
     if generate_md:
-        ir_dict = json.loads(denoised_path.read_text(encoding="utf-8"))
+        ir_dict = json.loads(summary_ir_path.read_text(encoding="utf-8"))
 
         if md_mode == "template":
             md = render_markdown_template(ir_dict)
