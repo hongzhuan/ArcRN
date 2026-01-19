@@ -76,7 +76,7 @@ def generate_markdown_from_ir(
         system_prompt: str = SYSTEM_PROMPT_STRICT,
         api_key_env: str = "DEEPSEEK_API_KEY",
         temperature: float = 0.2,
-        max_tokens: int = 1200,
+        max_tokens: int = 4096,
 ) -> str:
     """
     输入：已“精简后的”IR dict（建议只包含 meta/quality/entities/changes 的必要字段）
@@ -136,7 +136,7 @@ def generate_change_summary_structured(
     model: str = DEFAULT_MODEL,
     api_key_env: str = "DEEPSEEK_API_KEY",
     temperature: float = 0.2,
-    max_tokens: int = 600,
+    max_tokens: int = 4096,
 ) -> str:
     """
     Stage-1: 对单条 change 生成结构化摘要（JSON dict）。

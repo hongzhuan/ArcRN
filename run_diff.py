@@ -306,7 +306,7 @@ def main() -> None:
     print(f"Wrote DENOISED IR: {denoised_significance_path}")
     print(f"DENOISED total changes: {len(filtered_changes)} (dropped={denoise_stats.get('dropped')})")
 
-    # === 7) optional markdown summary（默认用 denoised 作为输入） ===
+    # === 7) optional markdown summary（默认用 diff_ir-summary.json 作为输入） ===
     if generate_md:
         ir_dict = json.loads(summary_ir_path.read_text(encoding="utf-8"))
 
